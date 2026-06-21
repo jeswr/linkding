@@ -1,0 +1,12 @@
+@prefix fedreg: <https://w3id.org/jeswr/fedreg#>.
+@prefix fedapp: <https://w3id.org/jeswr/fed#>.
+@prefix dcat: <http://www.w3.org/ns/dcat#>.
+@prefix dct: <http://purl.org/dc/terms/>.
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>.
+
+<http://localhost:5173/federation-membership.ttl#membership> a fedreg:Membership;
+    fedreg:app <http://localhost:5173/clientid.jsonld>;
+    fedreg:status fedreg:Active;
+    fedreg:assertedBy <https://w3id.org/jeswr/PLACEHOLDER-maintainer-webid#me>;
+    fedreg:asserted "2026-06-21T10:36:04.600Z"^^xsd:dateTime.

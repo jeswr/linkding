@@ -1,0 +1,50 @@
+{
+  "@context": [
+    "https://www.w3.org/ns/solid/oidc-context.jsonld",
+    {
+      "fed": "https://w3id.org/jeswr/fed#",
+      "sector": {
+        "@id": "fed:sector",
+        "@type": "@id"
+      },
+      "produces": {
+        "@id": "fed:produces",
+        "@type": "@id"
+      },
+      "declaresShape": {
+        "@id": "fed:declaresShape",
+        "@type": "@id"
+      },
+      "access": "fed:access",
+      "App": "fed:App"
+    }
+  ],
+  "client_id": "http://localhost:5173/clientid.jsonld",
+  "client_name": "linkding (pod-backed)",
+  "client_uri": "http://localhost:5173/",
+  "logo_uri": "http://localhost:5173/logo.png",
+  "redirect_uris": [
+    "http://localhost:5173/callback.html"
+  ],
+  "scope": "openid webid offline_access",
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "token_endpoint_auth_method": "none",
+  "@type": "App",
+  "sector": "https://w3id.org/jeswr/sectors/bookmarks#sector",
+  "access": [
+    "Read",
+    "Write"
+  ],
+  "produces": [
+    "https://w3id.org/jeswr/bookmark#Bookmark"
+  ],
+  "declaresShape": [
+    "https://w3id.org/jeswr/sectors/bookmarks/shapes#BookmarkShape"
+  ]
+}

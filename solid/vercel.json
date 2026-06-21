@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "headers": [
+    {
+      "source": "/clientid.jsonld",
+      "headers": [
+        { "key": "content-type", "value": "application/ld+json" },
+        { "key": "cache-control", "value": "public, max-age=300" }
+      ]
+    },
+    {
+      "source": "/federation-membership.ttl",
+      "headers": [{ "key": "content-type", "value": "text/turtle" }]
+    }
+  ]
+}

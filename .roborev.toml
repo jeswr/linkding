@@ -1,0 +1,3 @@
+# roborev — post-commit review (suite convention)
+reviewer = "codex"
+review_min_severity = "low"

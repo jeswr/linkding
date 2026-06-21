@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Signing in…</title>
+  </head>
+  <body>
+    <!-- The reactive-authentication popup callback: hand the code URL back to the opener. -->
+    <script>
+      opener.postMessage(location.href);
+    </script>
+    <p>Signing you in…</p>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+node_modules
+dist
+*.local
+.DS_Store
+tsconfig.tsbuildinfo
+
+# The repo-root .gitignore ignores `lib/` (a Python convention); our TS source
+# lives in src/lib, so un-ignore it for this SPA subtree.
+!/src/lib/
+!/src/lib/**
