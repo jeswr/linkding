@@ -78,10 +78,29 @@ describe("applyQuery", () => {
 describe("tagCloud", () => {
   it("counts tags across active bookmarks, sorted", () => {
     expect(tagCloud(fixtures)).toEqual([
-      { tag: "js", count: 2 },
-      { tag: "rdf", count: 1 },
-      { tag: "react", count: 1 },
-      { tag: "solid", count: 1 }, // c (archived) not counted
+      { tag: "js", label: "js", count: 2 },
+      { tag: "rdf", label: "rdf", count: 1 },
+      { tag: "react", label: "react", count: 1 },
+      { tag: "solid", label: "solid", count: 1 }, // c (archived) not counted
     ]);
+  });
+
+  it("de-duplicates mixed-case tags into one entry (case-insensitive count)", () => {
+    // `Solid`, `solid`, and `SOLID` must collapse into ONE cloud entry whose count
+    // is the sum — they filter as one, so they must show as one (the Low finding).
+    const mixed: PodBookmark[] = [
+      bm({ iri: "1", url: "https://a", tags: ["Solid", "RDF"] }),
+      bm({ iri: "2", url: "https://b", tags: ["solid"] }),
+      bm({ iri: "3", url: "https://c", tags: ["SOLID", "rdf"] }),
+    ];
+    const cloud = tagCloud(mixed);
+    // Keyed by lowercase: exactly two entries, not five.
+    expect(cloud.map((e) => e.tag)).toEqual(["rdf", "solid"]);
+    const solid = cloud.find((e) => e.tag === "solid");
+    expect(solid?.count).toBe(3); // Solid + solid + SOLID
+    expect(solid?.label).toBe("Solid"); // first-seen surface form preserved
+    const rdf = cloud.find((e) => e.tag === "rdf");
+    expect(rdf?.count).toBe(2); // RDF + rdf
+    expect(rdf?.label).toBe("RDF");
   });
 });

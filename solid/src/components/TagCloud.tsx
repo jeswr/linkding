@@ -1,6 +1,7 @@
 // AUTHORED-BY Claude Opus 4.8
 interface Props {
-  tags: { tag: string; count: number }[];
+  /** Tag entries: `tag` is the normalised (lowercased) key, `label` the display form. */
+  tags: { tag: string; label: string; count: number }[];
   selected: string[];
   onToggle: (tag: string) => void;
 }
@@ -12,8 +13,8 @@ export function TagCloud({ tags, selected, onToggle }: Props) {
     <aside className="tag-cloud" aria-label="Tags">
       <h2>Tags</h2>
       <div className="tag-cloud-items">
-        {tags.map(({ tag, count }) => {
-          const active = selected.map((t) => t.toLowerCase()).includes(tag.toLowerCase());
+        {tags.map(({ tag, label, count }) => {
+          const active = selected.map((t) => t.toLowerCase()).includes(tag);
           return (
             <button
               type="button"
@@ -22,7 +23,7 @@ export function TagCloud({ tags, selected, onToggle }: Props) {
               onClick={() => onToggle(tag)}
               aria-pressed={active}
             >
-              #{tag} <span className="tag-count">{count}</span>
+              #{label} <span className="tag-count">{count}</span>
             </button>
           );
         })}

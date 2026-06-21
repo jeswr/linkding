@@ -13,7 +13,7 @@ export interface BookmarksState {
   visible: PodBookmark[];
   query: Query;
   setQuery: (q: Query) => void;
-  tags: { tag: string; count: number }[];
+  tags: { tag: string; label: string; count: number }[];
   /** In-flight write count, for a "Saving…/Saved" indicator. */
   saving: number;
   reload: () => Promise<void>;

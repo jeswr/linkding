@@ -1,7 +1,7 @@
 // AUTHORED-BY Claude Opus 4.8
 import { fetchRdf } from "@jeswr/fetch-rdf";
 import { parseBookmark, serializeBookmark } from "@jeswr/solid-bookmark";
-import { ownerOnlyAcl } from "./acl.js";
+import { ownerOnlyAcl, ownerOnlyContainerAcl } from "./acl.js";
 import type { NewBookmark, PodBookmark } from "./types.js";
 
 /**
@@ -44,6 +44,12 @@ export class PodStore {
   private readonly container: string;
   private readonly webId: string;
   private readonly fetchFn: typeof globalThis.fetch;
+  /**
+   * Memoised promise of the one-time container owner-only ACL establishment. Set on
+   * the first `create()` (or an explicit `ensureContainerAcl()`) so the fail-closed
+   * container guard runs exactly once per store, not on every write.
+   */
+  private containerAcl: Promise<void> | undefined;
 
   constructor(config: PodStoreConfig) {
     if (!config.container.endsWith("/")) {
@@ -119,10 +125,95 @@ export class PodStore {
   }
 
   /**
-   * Create a new bookmark. Writes the **owner-only ACL first**, then the body, so
-   * the resource is never briefly world-readable. Returns the stored bookmark.
+   * Establish the bookmarks **container's** owner-only ACL — FAIL-CLOSED, exactly
+   * once per store (memoised). This is the keystone of the owner-only guarantee:
+   *
+   *   - The container ACL carries `acl:default`, so EVERY resource created inside
+   *     the container inherits owner-only access. That covers the brief window
+   *     between a bookmark's body being written and its own per-resource `.acl`
+   *     being applied — the resource is never world-readable, even momentarily,
+   *     which is what lets `create()` safely write the body before its `.acl`.
+   *   - If the container ACL cannot be CONFIRMED owner-private (a non-2xx PUT and
+   *     no verifiable owner-only ACL already in place), this REFUSES to proceed
+   *     (throws), so we never write bookmarks into a container we cannot prove is
+   *     owner-private. Fail-closed, not fail-open.
+   *
+   * The single accepted "ACLs not writable but already owner-private" path: a
+   * server that rejects the `.acl` PUT with a documented "method not allowed on a
+   * fixed-policy `.acl`" signal (405) AND whose existing container `.acl` we can
+   * fetch and confirm grants no public/authenticated access. Anything else throws.
+   */
+  async ensureContainerAcl(): Promise<void> {
+    if (!this.containerAcl) {
+      this.containerAcl = this.establishContainerAcl().catch((err) => {
+        // Don't cache a failure — a transient error should be retryable on the
+        // next create() rather than poisoning the store permanently.
+        this.containerAcl = undefined;
+        throw err;
+      });
+    }
+    return this.containerAcl;
+  }
+
+  private async establishContainerAcl(): Promise<void> {
+    const aclUrl = `${this.container}.acl`;
+    const acl = await ownerOnlyContainerAcl(this.container, this.webId);
+    const res = await this.fetchFn(aclUrl, {
+      method: "PUT",
+      headers: { "content-type": TURTLE },
+      body: acl,
+    });
+    if (res.ok) return; // owner-only container ACL now in place.
+
+    // The ONLY accepted non-2xx: the server won't let us write the container `.acl`
+    // (405 Method Not Allowed) but we can fetch the existing one and CONFIRM it is
+    // already owner-private (no public / authenticated-agent grant). Anything else
+    // (401/403/404/5xx/unconfirmable) FAILS CLOSED.
+    if (res.status === 405 && (await this.containerIsAlreadyOwnerPrivate(aclUrl))) {
+      return;
+    }
+    throw new Error(
+      `Refusing to store bookmarks: could not establish an owner-only ACL on the ` +
+        `container ${this.container} (${res.status} ${res.statusText} on ${aclUrl}). ` +
+        `Bookmarks are owner-private; aborting rather than risk a public container.`,
+    );
+  }
+
+  /**
+   * Confirm an EXISTING container `.acl` grants no public/authenticated-agent
+   * access (`acl:agentClass` foaf:Agent / acl:AuthenticatedAgent). Fail-closed: any
+   * fetch/parse failure, or any agentClass grant, returns false (= not confirmed).
+   */
+  private async containerIsAlreadyOwnerPrivate(aclUrl: string): Promise<boolean> {
+    let result: Awaited<ReturnType<typeof fetchRdf>>;
+    try {
+      result = await fetchRdf(aclUrl, { fetch: this.fetchFn });
+    } catch {
+      return false; // can't read it → can't confirm → fail closed.
+    }
+    const ACL_AGENT_CLASS = "http://www.w3.org/ns/auth/acl#agentClass";
+    for (const q of result.dataset.match(null, null, null)) {
+      // Any agentClass grant at all (foaf:Agent = public, acl:AuthenticatedAgent
+      // = any logged-in user) means it is NOT owner-private.
+      if (q.predicate.value === ACL_AGENT_CLASS) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Create a new bookmark — FAIL-CLOSED owner-only:
+   *   1. ensure the container has an owner-only ACL (with `acl:default`), so the new
+   *      resource inherits owner-only access during the create→acl window;
+   *   2. write the resource BODY (the order servers accept — a `.acl` for a resource
+   *      that doesn't yet exist is widely rejected);
+   *   3. PUT the resource's own owner-only `.acl`; if that fails and the inherited
+   *      container default cannot cover it, the create FAILS (and the orphaned body
+   *      is cleaned up) rather than silently leaving a resource without its ACL.
    */
   async create(data: NewBookmark): Promise<PodBookmark> {
+    // 0. FAIL-CLOSED: the container must be confirmed owner-private first.
+    await this.ensureContainerAcl();
+
     const iri = this.newIri();
     const now = new Date();
     const withDates: NewBookmark = {
@@ -130,9 +221,7 @@ export class PodStore {
       created: data.created ?? now,
       modified: data.modified ?? now,
     };
-    // 1. ACL first.
-    await this.putAcl(iri);
-    // 2. Body.
+    // 1. Body first (resource-then-acl — the order LDP/WAC servers accept).
     const ttl = await serializeBookmark(iri, withDates);
     const res = await this.fetchFn(iri, {
       method: "PUT",
@@ -140,6 +229,19 @@ export class PodStore {
       body: ttl,
     });
     assertOk(res, `create ${iri}`);
+
+    // 2. Per-resource ACL — fail closed. The body already inherits the container's
+    //    owner-only `acl:default`, so a server that doesn't expose a writable
+    //    per-resource `.acl` (405) is acceptable; a real auth/error failure is NOT,
+    //    and we clean up the orphaned body so we never leave a resource we couldn't
+    //    secure with its intended ACL.
+    try {
+      await this.putAcl(iri);
+    } catch (err) {
+      await this.bestEffortDelete(iri);
+      throw err;
+    }
+
     return {
       ...withDates,
       iri,
@@ -177,7 +279,18 @@ export class PodStore {
     if (res.status !== 404) assertOk(res, `remove ${iri}`);
   }
 
-  /** Write the owner-only ACL for a resource (best-effort: not all servers expose `.acl`). */
+  /**
+   * Write the owner-only ACL for a resource — FAIL-CLOSED.
+   *
+   * A non-2xx response is NOT silently swallowed. The single accepted exception is
+   * `405 Method Not Allowed`: a server that exposes no writable per-resource `.acl`
+   * (ACP-only / fixed-policy). That is acceptable ONLY because the resource already
+   * inherits the container's owner-only `acl:default` (established fail-closed in
+   * `ensureContainerAcl()` before any body is written), so it is still owner-only.
+   * Every other non-2xx — 401/403 (auth failure), 400/422 (malformed/rejected ACL),
+   * 5xx (server error) — THROWS, so the create fails rather than leaving the
+   * resource under inherited container *or* default permissions we cannot vouch for.
+   */
   private async putAcl(iri: string): Promise<void> {
     const aclUrl = `${iri}.acl`;
     const acl = await ownerOnlyAcl(iri, this.webId);
@@ -186,10 +299,23 @@ export class PodStore {
       headers: { "content-type": TURTLE },
       body: acl,
     });
-    // A server that doesn't support a writable `.acl` (ACP-only, or a fixed-policy
-    // server) returns 4xx — that's not fatal to creating the bookmark, but we
-    // surface a 5xx (a real failure).
-    if (res.status >= 500) assertOk(res, `acl ${aclUrl}`);
+    if (res.ok) return;
+    // Documented "no writable per-resource .acl, fixed/inherited policy" signal —
+    // acceptable ONLY because the container default already secures the resource.
+    if (res.status === 405) return;
+    throw new Error(
+      `Refusing to leave a bookmark without its owner-only ACL: ` +
+        `${res.status} ${res.statusText} writing ${aclUrl}.`,
+    );
+  }
+
+  /** Delete a resource ignoring failures — used to clean up an orphaned body. */
+  private async bestEffortDelete(iri: string): Promise<void> {
+    try {
+      await this.fetchFn(iri, { method: "DELETE" });
+    } catch {
+      // Cleanup is best-effort; the create already threw the meaningful error.
+    }
   }
 }
 

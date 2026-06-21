@@ -74,16 +74,32 @@ export function applyQuery(bookmarks: PodBookmark[], query: Query): PodBookmark[
   });
 }
 
-/** Build a sorted, deduplicated tag cloud with counts (Linkding's tag sidebar). */
-export function tagCloud(bookmarks: PodBookmark[]): { tag: string; count: number }[] {
-  const counts = new Map<string, number>();
+/**
+ * Build a sorted, deduplicated tag cloud with counts (Linkding's tag sidebar).
+ *
+ * Tags are counted by a **case-insensitive key** (lowercased) so that `Solid` and
+ * `solid` collapse into ONE cloud entry — matching the case-insensitive filter in
+ * {@link applyQuery}. Counting case-sensitively here would show two sidebar entries
+ * that both filter to the same set, which is the bug this normalisation fixes. The
+ * first-seen surface form is kept as the human-readable display label.
+ */
+export function tagCloud(
+  bookmarks: PodBookmark[],
+): { tag: string; label: string; count: number }[] {
+  const counts = new Map<string, { label: string; count: number }>();
   for (const b of bookmarks) {
     if (b.archived) continue;
     for (const tag of b.tags ?? []) {
-      counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      const key = tag.toLowerCase();
+      const existing = counts.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        counts.set(key, { label: tag, count: 1 });
+      }
     }
   }
   return [...counts.entries()]
-    .map(([tag, count]) => ({ tag, count }))
+    .map(([tag, { label, count }]) => ({ tag, label, count }))
     .sort((a, b) => a.tag.localeCompare(b.tag));
 }

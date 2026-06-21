@@ -7,14 +7,43 @@ const CONTAINER = "https://alice.pod/bookmarks/";
 const WEBID = "https://alice.pod/profile/card#me";
 
 /**
- * An in-memory fake pod: a Map of URL → { body, contentType, etag }. The returned
- * `fetch` records every request so we can assert ordering (ACL-before-body) and
- * conditional-write headers.
+ * Options to simulate a hostile/limited server for the fail-closed security tests.
  */
-function fakePod() {
+interface FakePodOptions {
+  /**
+   * Status to return for a PUT to a *per-resource* (non-container) `.acl`. When set
+   * to a non-2xx value this simulates a server rejecting the per-resource ACL write
+   * (e.g. 403 auth failure, 400 malformed). Default: accept (201).
+   */
+  resourceAclStatus?: number;
+  /**
+   * Status to return for a PUT to the *container* `.acl`. Non-2xx simulates a server
+   * that won't let us establish the container owner-only ACL. Default: accept (201).
+   */
+  containerAclStatus?: number;
+  /** An existing container `.acl` body to serve on GET (for the 405-confirm path). */
+  existingContainerAcl?: string;
+}
+
+/**
+ * An in-memory fake pod: a Map of URL → { body, contentType, etag }. The returned
+ * `fetch` records every request so we can assert ordering (body-before-acl) and
+ * conditional-write headers, and can be configured to REJECT ACL writes so the
+ * fail-closed owner-only guarantees can be tested.
+ */
+function fakePod(options: FakePodOptions = {}) {
   const store = new Map<string, { body: string; contentType: string; etag: string }>();
   const requests: { method: string; url: string; headers: Record<string, string> }[] = [];
   let etagSeq = 0;
+
+  const containerAclUrl = `${CONTAINER}.acl`;
+  if (options.existingContainerAcl) {
+    store.set(containerAclUrl, {
+      body: options.existingContainerAcl,
+      contentType: "text/turtle",
+      etag: '"existing-acl"',
+    });
+  }
 
   const containerListing = () => {
     const children = [...store.keys()].filter(
@@ -51,6 +80,20 @@ function fakePod() {
     }
 
     if (method === "PUT") {
+      const isAcl = url.endsWith(".acl");
+      const isContainerAcl = url === containerAclUrl;
+      // Simulate ACL-write rejection per the configured options.
+      const rejectStatus = isContainerAcl
+        ? options.containerAclStatus
+        : isAcl
+          ? options.resourceAclStatus
+          : undefined;
+      if (rejectStatus !== undefined && rejectStatus >= 300) {
+        return new Response(`ACL write refused`, {
+          status: rejectStatus,
+          statusText: rejectStatus === 403 ? "Forbidden" : "Error",
+        });
+      }
       const etag = `"v${++etagSeq}"`;
       store.set(url, {
         body: (init?.body as string) ?? "",
@@ -86,14 +129,120 @@ describe("PodStore", () => {
     ).toThrow(/trailing slash/);
   });
 
-  it("create writes the owner-only ACL BEFORE the body", async () => {
+  it("create establishes the owner-only CONTAINER ACL before creating any resource", async () => {
+    // (b) The container owner-only ACL is established up-front, before the resource
+    //     is created — so the new resource inherits owner-only via acl:default.
     await podStore.create({ url: "https://example.org/a", title: "A", tags: ["x"] });
+    const containerAclUrl = `${CONTAINER}.acl`;
     const writes = pod.requests.filter((r) => r.method === "PUT");
-    const aclIdx = writes.findIndex((r) => r.url.endsWith(".acl"));
-    const bodyIdx = writes.findIndex((r) => !r.url.endsWith(".acl"));
-    expect(aclIdx).toBeGreaterThanOrEqual(0);
+    const containerAclIdx = writes.findIndex((r) => r.url === containerAclUrl);
+    const bodyIdx = writes.findIndex(
+      (r) => r.url.startsWith(CONTAINER) && r.url !== containerAclUrl && !r.url.endsWith(".acl"),
+    );
+    expect(containerAclIdx).toBeGreaterThanOrEqual(0);
     expect(bodyIdx).toBeGreaterThanOrEqual(0);
-    expect(aclIdx).toBeLessThan(bodyIdx); // ACL first
+    expect(containerAclIdx).toBeLessThan(bodyIdx); // container ACL first
+
+    // The container ACL must carry acl:default (covers created resources).
+    const containerAclBody = pod.store.get(containerAclUrl)?.body ?? "";
+    expect(containerAclBody).toContain("default");
+    expect(containerAclBody).toContain(WEBID);
+    expect(containerAclBody).not.toContain("agentClass"); // owner-only, no public grant
+  });
+
+  it("create writes the resource BODY before its own .acl (resource-then-acl order)", async () => {
+    // (c) Within a resource, the body is PUT before its `.acl` — the order LDP/WAC
+    //     servers accept (a `.acl` for a non-existent resource is widely rejected).
+    await podStore.create({ url: "https://example.org/a", title: "A", tags: ["x"] });
+    const containerAclUrl = `${CONTAINER}.acl`;
+    const writes = pod.requests.filter((r) => r.method === "PUT");
+    const bodyIdx = writes.findIndex(
+      (r) => r.url.startsWith(CONTAINER) && r.url !== containerAclUrl && !r.url.endsWith(".acl"),
+    );
+    const resourceAclIdx = writes.findIndex(
+      (r) => r.url.endsWith(".acl") && r.url !== containerAclUrl,
+    );
+    expect(bodyIdx).toBeGreaterThanOrEqual(0);
+    expect(resourceAclIdx).toBeGreaterThanOrEqual(0);
+    expect(bodyIdx).toBeLessThan(resourceAclIdx); // body first, then its .acl
+  });
+
+  it("create FAILS CLOSED when the per-resource .acl PUT is rejected (403)", async () => {
+    // (a) A failed `.acl` PUT makes create() throw — never silently succeed leaving
+    //     a resource under unverified permissions.
+    const hostile = fakePod({ resourceAclStatus: 403 });
+    const s = new PodStore({ container: CONTAINER, webId: WEBID, fetch: hostile.fetchFn });
+    await expect(s.create({ url: "https://example.org/secret", title: "S" })).rejects.toThrow(
+      /owner-only ACL|403/i,
+    );
+    // And the orphaned body is cleaned up (not left without its ACL).
+    const orphanBodies = [...hostile.store.keys()].filter(
+      (k) => k.startsWith(CONTAINER) && k !== CONTAINER && !k.endsWith(".acl"),
+    );
+    expect(orphanBodies).toEqual([]);
+    // A DELETE was issued to clean up.
+    expect(hostile.requests.some((r) => r.method === "DELETE")).toBe(true);
+  });
+
+  it("create FAILS CLOSED when the container ACL cannot be established (403)", async () => {
+    // The container owner-only guarantee can't be confirmed → refuse to store at all.
+    const hostile = fakePod({ containerAclStatus: 403 });
+    const s = new PodStore({ container: CONTAINER, webId: WEBID, fetch: hostile.fetchFn });
+    await expect(s.create({ url: "https://example.org/x", title: "X" })).rejects.toThrow(
+      /owner-only ACL|container/i,
+    );
+    // No resource body was ever written (we refused before creating anything).
+    const bodies = [...hostile.store.keys()].filter(
+      (k) => k.startsWith(CONTAINER) && k !== CONTAINER && !k.endsWith(".acl"),
+    );
+    expect(bodies).toEqual([]);
+  });
+
+  it("create FAILS CLOSED when the container ACL is 405 but NOT confirmable as owner-private", async () => {
+    // 405 (no writable container .acl) is only acceptable if the EXISTING container
+    // .acl can be confirmed owner-private. A public (foaf:Agent) one must fail closed.
+    const publicAcl =
+      "@prefix acl: <http://www.w3.org/ns/auth/acl#> .\n" +
+      "@prefix foaf: <http://xmlns.com/foaf/0.1/> .\n" +
+      `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+      " acl:agentClass foaf:Agent; acl:mode acl:Read ] .\n";
+    const hostile = fakePod({ containerAclStatus: 405, existingContainerAcl: publicAcl });
+    const s = new PodStore({ container: CONTAINER, webId: WEBID, fetch: hostile.fetchFn });
+    await expect(s.create({ url: "https://example.org/x", title: "X" })).rejects.toThrow(
+      /owner-only ACL|container/i,
+    );
+  });
+
+  it("create SUCCEEDS on a 405 container ACL that IS confirmed owner-private", async () => {
+    // Fixed-policy server: no writable container .acl (405) but the existing one is
+    // already owner-private (no agentClass). Accepted — the container default secures
+    // children — and the resource .acl 405 is then also acceptable.
+    const privateAcl =
+      "@prefix acl: <http://www.w3.org/ns/auth/acl#> .\n" +
+      `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+      ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write, acl:Control ] .\n`;
+    const fixed = fakePod({
+      containerAclStatus: 405,
+      resourceAclStatus: 405,
+      existingContainerAcl: privateAcl,
+    });
+    const s = new PodStore({ container: CONTAINER, webId: WEBID, fetch: fixed.fetchFn });
+    const created = await s.create({ url: "https://example.org/ok", title: "OK" });
+    expect(created.iri.startsWith(CONTAINER)).toBe(true);
+    // The body was written (and not cleaned up).
+    const bodies = [...fixed.store.keys()].filter(
+      (k) => k.startsWith(CONTAINER) && k !== CONTAINER && !k.endsWith(".acl"),
+    );
+    expect(bodies).toHaveLength(1);
+  });
+
+  it("establishes the container ACL only ONCE across multiple creates", async () => {
+    await podStore.create({ url: "https://example.org/1", title: "1" });
+    await podStore.create({ url: "https://example.org/2", title: "2" });
+    const containerAclWrites = pod.requests.filter(
+      (r) => r.method === "PUT" && r.url === `${CONTAINER}.acl`,
+    );
+    expect(containerAclWrites).toHaveLength(1); // memoised
   });
 
   it("create round-trips through list/get", async () => {
