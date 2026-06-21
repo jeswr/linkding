@@ -187,22 +187,29 @@ export class PodStore {
    * fail-CLOSED, positive proof — NOT a negative "no public grant" heuristic. It
    * returns `true` ONLY IF the parsed `.acl`:
    *
-   *   1. contains at least one `acl:Authorization` that ALL of:
-   *        - has `acl:accessTo <this.container>` (protects the container itself),
-   *        - has `acl:default <this.container>` (protects every CHILD resource —
-   *          this is the clause the create→acl window relies on),
-   *        - has `acl:agent <this.webId>` (the owner), and
-   *        - grants that authorization `acl:mode` Read AND Write AND Control; AND
-   *   2. contains NO authorization (anywhere in the document) that grants any
+   *   1. `acl:accessTo <this.container>` coverage: there EXISTS an
+   *        `acl:Authorization` that has `acl:accessTo <this.container>` +
+   *        `acl:agent <this.webId>` (the owner) + `acl:mode` Read AND Write AND
+   *        Control (protects the container itself); AND
+   *   2. `acl:default <this.container>` coverage: there EXISTS an
+   *        `acl:Authorization` that has `acl:default <this.container>` +
+   *        `acl:agent <this.webId>` + `acl:mode` Read AND Write AND Control
+   *        (protects every CHILD resource — the clause the create→acl window relies
+   *        on). This MAY be the SAME authorization as (1) or a DIFFERENT one: WAC
+   *        validly splits access and default across two owner-only authorizations,
+   *        so we validate the two coverages INDEPENDENTLY rather than demanding both
+   *        on one subject; AND
+   *   3. contains NO authorization (anywhere in the document) that grants any
    *        `acl:agentClass` (e.g. foaf:Agent = public, acl:AuthenticatedAgent = any
    *        logged-in user) or any `acl:agent` OTHER than `this.webId` (no public,
    *        authenticated, or third-party grant).
    *
    * Anything not positively proven owner-only — an empty ACL, an ACL missing
-   * `acl:default`, an ACL missing one of the owner's R/W/C modes, an ACL granting a
-   * foreign agent or an agentClass, or an ACL we can't fetch/parse — returns `false`
-   * (fail closed). A non-owner grant ANYWHERE in the document fails it, even if a
-   * separate owner-only authorization also exists.
+   * `acl:accessTo` OR `acl:default` owner coverage, an ACL missing one of the
+   * owner's R/W/C modes on either, an ACL granting a foreign agent or an
+   * agentClass, or an ACL we can't fetch/parse — returns `false` (fail closed). A
+   * non-owner grant ANYWHERE in the document fails it, even if a separate owner-only
+   * authorization also exists.
    */
   private async containerIsAlreadyOwnerPrivate(aclUrl: string): Promise<boolean> {
     let result: Awaited<ReturnType<typeof fetchRdf>>;
@@ -235,27 +242,36 @@ export class PodStore {
       if (q.object.value !== this.webId) return false; // a third-party agent grant.
     }
 
-    // (1) POSITIVE PROOF: find an Authorization that, for THIS container, grants the
-    //     owner Read+Write+Control over both `acl:accessTo` and `acl:default`. All
-    //     conditions must hold on the SAME authorization subject.
+    // (1)+(2) POSITIVE PROOF, validated INDEPENDENTLY: the owner must have a complete
+    //     Read+Write+Control authorization covering `acl:accessTo <container>` AND a
+    //     complete Read+Write+Control authorization covering `acl:default <container>`.
+    //     WAC validly expresses these as SEPARATE owner-only authorizations, so we do
+    //     NOT require both clauses on one subject — each coverage is proven on its own.
     const container = namedNode(this.container);
     const owner = namedNode(this.webId);
-    for (const q of dataset.match(null, namedNode(RDF_TYPE), namedNode(AUTHORIZATION))) {
-      const authz = q.subject;
-      const has = (predicate: string, object: ReturnType<typeof namedNode>): boolean =>
-        dataset.match(authz, namedNode(predicate), object).size > 0;
-      if (
-        has(ACCESS_TO, container) &&
-        has(DEFAULT, container) &&
-        has(AGENT, owner) &&
-        has(MODE, namedNode(READ)) &&
-        has(MODE, namedNode(WRITE)) &&
-        has(MODE, namedNode(CONTROL))
-      ) {
-        return true; // positively proven owner-only for this container.
+    // True iff SOME Authorization grants the owner R+W+C and has `target <container>`.
+    const ownerHasFullControlOver = (target: string): boolean => {
+      for (const q of dataset.match(null, namedNode(RDF_TYPE), namedNode(AUTHORIZATION))) {
+        const authz = q.subject;
+        const has = (predicate: string, object: ReturnType<typeof namedNode>): boolean =>
+          dataset.match(authz, namedNode(predicate), object).size > 0;
+        if (
+          has(target, container) &&
+          has(AGENT, owner) &&
+          has(MODE, namedNode(READ)) &&
+          has(MODE, namedNode(WRITE)) &&
+          has(MODE, namedNode(CONTROL))
+        ) {
+          return true;
+        }
       }
+      return false;
+    };
+    // Both coverages must hold (each MAY be the same authz or two different ones).
+    if (ownerHasFullControlOver(ACCESS_TO) && ownerHasFullControlOver(DEFAULT)) {
+      return true; // positively proven owner-only for this container.
     }
-    return false; // no owner-only authorization found → fail closed.
+    return false; // accessTo and/or default owner coverage missing → fail closed.
   }
 
   /**

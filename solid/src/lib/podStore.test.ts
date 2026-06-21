@@ -378,6 +378,31 @@ describe("PodStore", () => {
     expect(bodies).toHaveLength(1);
   });
 
+  it("POSITIVE: a SPLIT owner-only ACL (accessTo + default on SEPARATE authzs) lets create SUCCEED", async () => {
+    // WAC validly expresses access + default as TWO separate owner-only
+    // authorizations. Both are owner+RWC, no other grant — independently they cover
+    // accessTo and default, so the document IS owner-private. create() must succeed.
+    // (This is the round-2 regression: the over-strict same-subject check rejected it.)
+    const splitOwnerOnly =
+      ACL_PREFIXES +
+      `[ a acl:Authorization; acl:accessTo <${CONTAINER}>;` +
+      ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write, acl:Control ] .\n` +
+      `[ a acl:Authorization; acl:default <${CONTAINER}>;` +
+      ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write, acl:Control ] .\n`;
+    const fixed = fakePod({
+      containerAclStatus: 405,
+      resourceAclStatus: 405,
+      existingContainerAcl: splitOwnerOnly,
+    });
+    const s = new PodStore({ container: CONTAINER, webId: WEBID, fetch: fixed.fetchFn });
+    const created = await s.create({ url: "https://example.org/split-ok", title: "OK" });
+    expect(created.iri.startsWith(CONTAINER)).toBe(true);
+    const bodies = [...fixed.store.keys()].filter(
+      (k) => k.startsWith(CONTAINER) && k !== CONTAINER && !k.endsWith(".acl"),
+    );
+    expect(bodies).toHaveLength(1);
+  });
+
   it("establishes the container ACL only ONCE across multiple creates", async () => {
     await podStore.create({ url: "https://example.org/1", title: "1" });
     await podStore.create({ url: "https://example.org/2", title: "2" });
