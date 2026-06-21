@@ -236,6 +236,148 @@ describe("PodStore", () => {
     expect(bodies).toHaveLength(1);
   });
 
+  // --------------------------------------------------------------------------
+  // POSITIVE-VALIDATION ACL matrix (suite-tracker-uf6 — HIGH fail-open fix).
+  //
+  // `containerIsAlreadyOwnerPrivate()` must POSITIVELY prove the existing container
+  // `.acl` is owner-only before the 405 path is allowed to proceed. Every malformed
+  // / under-specified / over-permissive ACL below must FAIL CLOSED: create() throws
+  // and writes NO resource body. Only a complete owner-only accessTo+default+RWC
+  // authorization (and no other grant) lets create() succeed.
+  // --------------------------------------------------------------------------
+  const ACL_PREFIXES =
+    "@prefix acl: <http://www.w3.org/ns/auth/acl#> .\n" +
+    "@prefix foaf: <http://xmlns.com/foaf/0.1/> .\n";
+
+  /** Assert: a 405 container ACL with the given existing `.acl` body FAILS CLOSED. */
+  async function expectFailsClosed(existingContainerAcl: string) {
+    const hostile = fakePod({ containerAclStatus: 405, existingContainerAcl });
+    const s = new PodStore({ container: CONTAINER, webId: WEBID, fetch: hostile.fetchFn });
+    await expect(s.create({ url: "https://example.org/x", title: "X" })).rejects.toThrow(
+      /owner-only ACL|container/i,
+    );
+    // Nothing was written — we refused before creating any resource body.
+    const bodies = [...hostile.store.keys()].filter(
+      (k) => k.startsWith(CONTAINER) && k !== CONTAINER && !k.endsWith(".acl"),
+    );
+    expect(bodies).toEqual([]);
+  }
+
+  it("FAILS CLOSED: an EMPTY container ACL is not owner-private", async () => {
+    // An empty `.acl` proves nothing — the old negative check wrongly passed it.
+    await expectFailsClosed(ACL_PREFIXES);
+  });
+
+  it("FAILS CLOSED: owner accessTo but MISSING acl:default (children unprotected)", async () => {
+    // Without acl:default, created CHILD resources are NOT covered — fail closed.
+    await expectFailsClosed(
+      ACL_PREFIXES +
+        `[ a acl:Authorization; acl:accessTo <${CONTAINER}>;` +
+        ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write, acl:Control ] .\n`,
+    );
+  });
+
+  it("FAILS CLOSED: missing acl:accessTo (only default) is not a complete owner authz", async () => {
+    await expectFailsClosed(
+      ACL_PREFIXES +
+        `[ a acl:Authorization; acl:default <${CONTAINER}>;` +
+        ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write, acl:Control ] .\n`,
+    );
+  });
+
+  it("FAILS CLOSED: owner authz MISSING acl:Control mode", async () => {
+    await expectFailsClosed(
+      ACL_PREFIXES +
+        `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+        ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write ] .\n`,
+    );
+  });
+
+  it("FAILS CLOSED: owner authz MISSING acl:Write mode", async () => {
+    await expectFailsClosed(
+      ACL_PREFIXES +
+        `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+        ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Control ] .\n`,
+    );
+  });
+
+  it("FAILS CLOSED: a NON-owner third-party acl:agent grant alongside the owner", async () => {
+    // A complete owner authz exists, but a SECOND authz grants a third party — the
+    // foreign-grant guard must disqualify the whole document.
+    await expectFailsClosed(
+      ACL_PREFIXES +
+        `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+        ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write, acl:Control ] .\n` +
+        `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+        " acl:agent <https://eve.pod/profile/card#me>; acl:mode acl:Read ] .\n",
+    );
+  });
+
+  it("FAILS CLOSED: an acl:agentClass foaf:Agent (public) grant", async () => {
+    await expectFailsClosed(
+      ACL_PREFIXES +
+        `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+        ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write, acl:Control ] .\n` +
+        `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+        " acl:agentClass foaf:Agent; acl:mode acl:Read ] .\n",
+    );
+  });
+
+  it("FAILS CLOSED: an acl:agentClass acl:AuthenticatedAgent grant", async () => {
+    await expectFailsClosed(
+      ACL_PREFIXES +
+        `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+        ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write, acl:Control ] .\n` +
+        `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+        " acl:agentClass acl:AuthenticatedAgent; acl:mode acl:Read ] .\n",
+    );
+  });
+
+  it("FAILS CLOSED: owner authz for a DIFFERENT container target (wrong accessTo/default)", async () => {
+    // The complete owner authz targets some OTHER container — it does not protect
+    // THIS container, so it is no proof for this one.
+    const other = "https://alice.pod/other/";
+    await expectFailsClosed(
+      ACL_PREFIXES +
+        `[ a acl:Authorization; acl:accessTo <${other}>; acl:default <${other}>;` +
+        ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write, acl:Control ] .\n`,
+    );
+  });
+
+  it("FAILS CLOSED: an unfetchable / unparseable existing container ACL", async () => {
+    // A 405 with no readable existing `.acl` (GET 404s) → cannot confirm → fail closed.
+    const hostile = fakePod({ containerAclStatus: 405 });
+    const s = new PodStore({ container: CONTAINER, webId: WEBID, fetch: hostile.fetchFn });
+    await expect(s.create({ url: "https://example.org/x", title: "X" })).rejects.toThrow(
+      /owner-only ACL|container/i,
+    );
+    const bodies = [...hostile.store.keys()].filter(
+      (k) => k.startsWith(CONTAINER) && k !== CONTAINER && !k.endsWith(".acl"),
+    );
+    expect(bodies).toEqual([]);
+  });
+
+  it("POSITIVE: a complete owner-only accessTo+default+RWC ACL lets create SUCCEED", async () => {
+    // Owner authz with accessTo + default + Read/Write/Control + no other grant — the
+    // single shape that positively proves owner-only. create() must succeed.
+    const ownerOnly =
+      ACL_PREFIXES +
+      `[ a acl:Authorization; acl:accessTo <${CONTAINER}>; acl:default <${CONTAINER}>;` +
+      ` acl:agent <${WEBID}>; acl:mode acl:Read, acl:Write, acl:Control ] .\n`;
+    const fixed = fakePod({
+      containerAclStatus: 405,
+      resourceAclStatus: 405,
+      existingContainerAcl: ownerOnly,
+    });
+    const s = new PodStore({ container: CONTAINER, webId: WEBID, fetch: fixed.fetchFn });
+    const created = await s.create({ url: "https://example.org/ok", title: "OK" });
+    expect(created.iri.startsWith(CONTAINER)).toBe(true);
+    const bodies = [...fixed.store.keys()].filter(
+      (k) => k.startsWith(CONTAINER) && k !== CONTAINER && !k.endsWith(".acl"),
+    );
+    expect(bodies).toHaveLength(1);
+  });
+
   it("establishes the container ACL only ONCE across multiple creates", async () => {
     await podStore.create({ url: "https://example.org/1", title: "1" });
     await podStore.create({ url: "https://example.org/2", title: "2" });

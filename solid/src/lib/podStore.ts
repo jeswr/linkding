@@ -1,8 +1,11 @@
 // AUTHORED-BY Claude Opus 4.8
 import { fetchRdf } from "@jeswr/fetch-rdf";
 import { parseBookmark, serializeBookmark } from "@jeswr/solid-bookmark";
+import { DataFactory } from "n3";
 import { ownerOnlyAcl, ownerOnlyContainerAcl } from "./acl.js";
 import type { NewBookmark, PodBookmark } from "./types.js";
+
+const { namedNode } = DataFactory;
 
 /**
  * Pod-backed bookmark CRUD over LDP — the Solid replacement for Linkding's Django
@@ -180,9 +183,26 @@ export class PodStore {
   }
 
   /**
-   * Confirm an EXISTING container `.acl` grants no public/authenticated-agent
-   * access (`acl:agentClass` foaf:Agent / acl:AuthenticatedAgent). Fail-closed: any
-   * fetch/parse failure, or any agentClass grant, returns false (= not confirmed).
+   * POSITIVELY confirm an EXISTING container `.acl` is owner-only. This is a
+   * fail-CLOSED, positive proof — NOT a negative "no public grant" heuristic. It
+   * returns `true` ONLY IF the parsed `.acl`:
+   *
+   *   1. contains at least one `acl:Authorization` that ALL of:
+   *        - has `acl:accessTo <this.container>` (protects the container itself),
+   *        - has `acl:default <this.container>` (protects every CHILD resource —
+   *          this is the clause the create→acl window relies on),
+   *        - has `acl:agent <this.webId>` (the owner), and
+   *        - grants that authorization `acl:mode` Read AND Write AND Control; AND
+   *   2. contains NO authorization (anywhere in the document) that grants any
+   *        `acl:agentClass` (e.g. foaf:Agent = public, acl:AuthenticatedAgent = any
+   *        logged-in user) or any `acl:agent` OTHER than `this.webId` (no public,
+   *        authenticated, or third-party grant).
+   *
+   * Anything not positively proven owner-only — an empty ACL, an ACL missing
+   * `acl:default`, an ACL missing one of the owner's R/W/C modes, an ACL granting a
+   * foreign agent or an agentClass, or an ACL we can't fetch/parse — returns `false`
+   * (fail closed). A non-owner grant ANYWHERE in the document fails it, even if a
+   * separate owner-only authorization also exists.
    */
   private async containerIsAlreadyOwnerPrivate(aclUrl: string): Promise<boolean> {
     let result: Awaited<ReturnType<typeof fetchRdf>>;
@@ -191,13 +211,51 @@ export class PodStore {
     } catch {
       return false; // can't read it → can't confirm → fail closed.
     }
-    const ACL_AGENT_CLASS = "http://www.w3.org/ns/auth/acl#agentClass";
-    for (const q of result.dataset.match(null, null, null)) {
-      // Any agentClass grant at all (foaf:Agent = public, acl:AuthenticatedAgent
-      // = any logged-in user) means it is NOT owner-private.
-      if (q.predicate.value === ACL_AGENT_CLASS) return false;
+    const dataset = result.dataset;
+    const ns = "http://www.w3.org/ns/auth/acl#";
+    const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    const AUTHORIZATION = `${ns}Authorization`;
+    const ACCESS_TO = `${ns}accessTo`;
+    const DEFAULT = `${ns}default`;
+    const AGENT = `${ns}agent`;
+    const AGENT_CLASS = `${ns}agentClass`;
+    const MODE = `${ns}mode`;
+    const READ = `${ns}Read`;
+    const WRITE = `${ns}Write`;
+    const CONTROL = `${ns}Control`;
+
+    // (2) FOREIGN-GRANT GUARD (checked first, fail-fast): any `acl:agentClass` grant
+    //     at all, or any `acl:agent` that is NOT the owner, means the document is not
+    //     owner-private — regardless of any owner-only authorization that may also
+    //     exist. A single public/authenticated/third-party grant disqualifies it.
+    if (dataset.match(null, namedNode(AGENT_CLASS), null).size > 0) {
+      return false; // public (foaf:Agent) or authenticated (acl:AuthenticatedAgent).
     }
-    return true;
+    for (const q of dataset.match(null, namedNode(AGENT), null)) {
+      if (q.object.value !== this.webId) return false; // a third-party agent grant.
+    }
+
+    // (1) POSITIVE PROOF: find an Authorization that, for THIS container, grants the
+    //     owner Read+Write+Control over both `acl:accessTo` and `acl:default`. All
+    //     conditions must hold on the SAME authorization subject.
+    const container = namedNode(this.container);
+    const owner = namedNode(this.webId);
+    for (const q of dataset.match(null, namedNode(RDF_TYPE), namedNode(AUTHORIZATION))) {
+      const authz = q.subject;
+      const has = (predicate: string, object: ReturnType<typeof namedNode>): boolean =>
+        dataset.match(authz, namedNode(predicate), object).size > 0;
+      if (
+        has(ACCESS_TO, container) &&
+        has(DEFAULT, container) &&
+        has(AGENT, owner) &&
+        has(MODE, namedNode(READ)) &&
+        has(MODE, namedNode(WRITE)) &&
+        has(MODE, namedNode(CONTROL))
+      ) {
+        return true; // positively proven owner-only for this container.
+      }
+    }
+    return false; // no owner-only authorization found → fail closed.
   }
 
   /**
