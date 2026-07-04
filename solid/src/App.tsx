@@ -33,9 +33,12 @@ export function App() {
   const handleLogin = useCallback(async (webId: string) => {
     await startLogin(webId);
     // After login the patched fetch is authenticated; derive the storage.
+    // `resolveStorages` returns only validated, normalised container roots (http(s),
+    // no query/fragment, trailing slash) — build the sub-path via `new URL(child,
+    // base)` rather than string-concatenating a raw profile value.
     const storages = await resolveStorages(webId);
     const base = storages[0] ?? new URL("/", webId).toString();
-    const container = base.endsWith("/") ? `${base}bookmarks/` : `${base}/bookmarks/`;
+    const container = new URL("bookmarks/", base).toString();
     setSession({ webId, container });
   }, []);
 

@@ -44,6 +44,42 @@ export async function resolveIssuers(
   return issuers;
 }
 
+/**
+ * Validate + normalise a raw `pim:storage` value into a canonical container address:
+ * an absolute `http(s)` URL, no query/fragment, path forced to end with `/` (a
+ * `pim:storage` value names a container, so any resource-shaped value is treated as
+ * that container's root). A profile document is untrusted input (it may be someone
+ * else's, or forged), so this is the ONLY place `resolveStorages` trusts a
+ * `pim:storage` object — everything downstream (this file, `App.tsx`) then builds
+ * sub-paths via `new URL(child, base)` against the returned, already-normalised base
+ * rather than string-concatenating the raw value.
+ *
+ * Returns `undefined` (drop, don't throw — a malformed value from one predicate
+ * instance must not abort resolution of the others) when the value:
+ *   - is not a parseable absolute URL;
+ *   - is not `http:`/`https:` (refuses `file:`, `javascript:`, `data:`, …);
+ *   - carries a `search` or `hash` (a container address carries neither — a
+ *     `?`/`#`-bearing value is not a legitimate storage root).
+ */
+function normalizeStorageRoot(raw: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return undefined;
+  }
+  if (url.search !== "" || url.hash !== "") {
+    return undefined;
+  }
+  if (!url.pathname.endsWith("/")) {
+    url.pathname = `${url.pathname}/`;
+  }
+  return url.toString();
+}
+
 /** The storage container(s) advertised by a WebID profile (`pim:storage`). */
 export async function resolveStorages(
   webId: string,
@@ -53,7 +89,10 @@ export async function resolveStorages(
   const storages: string[] = [];
   for (const q of dataset.match(null, null, null)) {
     if (q.predicate.value === PIM_STORAGE && q.object.termType === "NamedNode") {
-      storages.push(q.object.value);
+      const normalized = normalizeStorageRoot(q.object.value);
+      if (normalized !== undefined) {
+        storages.push(normalized);
+      }
     }
   }
   return storages;
