@@ -49,4 +49,40 @@ describe("resolveStorages", () => {
     const out = await resolveStorages("https://alice.pod/profile/card#me", stubFetch(PROFILE));
     expect(out).toEqual(["https://alice.pod/"]);
   });
+
+  it("rejects a non-http(s) pim:storage value (e.g. file:/javascript:)", async () => {
+    const profile = `
+@prefix solid: <http://www.w3.org/ns/solid/terms#> .
+@prefix pim: <http://www.w3.org/ns/pim/space#> .
+<https://alice.pod/profile/card#me>
+  solid:oidcIssuer <https://idp.example/> ;
+  pim:storage <file:///etc/passwd> ;
+  pim:storage <javascript:alert(1)> .
+`;
+    const out = await resolveStorages("https://alice.pod/profile/card#me", stubFetch(profile));
+    expect(out).toEqual([]);
+  });
+
+  it("drops a pim:storage value carrying a query or fragment, keeping valid entries", async () => {
+    const profile = `
+@prefix pim: <http://www.w3.org/ns/pim/space#> .
+<https://alice.pod/profile/card#me>
+  pim:storage <https://alice.pod/?q=/> ;
+  pim:storage <https://alice.pod/storage/#/> ;
+  pim:storage <https://alice.pod/real/> .
+`;
+    const out = await resolveStorages("https://alice.pod/profile/card#me", stubFetch(profile));
+    expect(out).toEqual(["https://alice.pod/real/"]);
+  });
+
+  it("accepts a real storage root and normalises a resource-shaped value to a container", async () => {
+    const profile = `
+@prefix pim: <http://www.w3.org/ns/pim/space#> .
+<https://alice.pod/profile/card#me>
+  pim:storage <https://alice.pod/> ;
+  pim:storage <https://alice.pod/storage> .
+`;
+    const out = await resolveStorages("https://alice.pod/profile/card#me", stubFetch(profile));
+    expect(out).toEqual(["https://alice.pod/", "https://alice.pod/storage/"]);
+  });
 });
