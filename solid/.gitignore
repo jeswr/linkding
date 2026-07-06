@@ -8,3 +8,4 @@ tsconfig.tsbuildinfo
 # lives in src/lib, so un-ignore it for this SPA subtree.
 !/src/lib/
 !/src/lib/**
+.vercel

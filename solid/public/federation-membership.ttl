@@ -5,8 +5,8 @@
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>.
 
-<http://localhost:5173/federation-membership.ttl#membership> a fedreg:Membership;
-    fedreg:app <http://localhost:5173/clientid.jsonld>;
+<https://linkding-solid.vercel.app/federation-membership.ttl#membership> a fedreg:Membership;
+    fedreg:app <https://linkding-solid.vercel.app/clientid.jsonld>;
     fedreg:status fedreg:Active;
-    fedreg:assertedBy <https://w3id.org/jeswr/PLACEHOLDER-maintainer-webid#me>;
-    fedreg:asserted "2026-06-21T10:36:04.600Z"^^xsd:dateTime.
+    fedreg:assertedBy <https://jeswr.org/#me>;
+    fedreg:asserted "2026-07-06T16:53:16.708Z"^^xsd:dateTime.

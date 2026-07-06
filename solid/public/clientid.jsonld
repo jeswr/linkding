@@ -19,12 +19,12 @@
       "App": "fed:App"
     }
   ],
-  "client_id": "http://localhost:5173/clientid.jsonld",
+  "client_id": "https://linkding-solid.vercel.app/clientid.jsonld",
   "client_name": "linkding (pod-backed)",
-  "client_uri": "http://localhost:5173/",
-  "logo_uri": "http://localhost:5173/logo.png",
+  "client_uri": "https://linkding-solid.vercel.app/",
+  "logo_uri": "https://linkding-solid.vercel.app/logo.png",
   "redirect_uris": [
-    "http://localhost:5173/callback.html"
+    "https://linkding-solid.vercel.app/callback.html"
   ],
   "scope": "openid webid offline_access",
   "grant_types": [
