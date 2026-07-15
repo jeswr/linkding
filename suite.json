@@ -1,0 +1,10 @@
+{
+  "$schema": "https://solid.example/suite-tracking/suite.schema.json",
+  "id": "linkding",
+  "kind": "app",
+  "name": "Linkding (Solid)",
+  "repo": "https://github.com/jeswr/linkding",
+  "category": "productivity",
+  "maturity": "beta",
+  "visibility": "public"
+}
